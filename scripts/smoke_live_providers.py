@@ -13,10 +13,12 @@ import json
 import os
 import sys
 import urllib.request
+import wave
 import websockets
 
 INGRESS_URL = os.environ.get("CADENCE_INGRESS_URL", "ws://127.0.0.1:8080/v1/tts/stream")
 HTTP_ADDR = os.environ.get("CADENCE_INGRESS_ADDR", "127.0.0.1:8080")
+WAV_OUTPUT_PATH = os.environ.get("CADENCE_OUTPUT_WAV", "tests/artifacts/live_e2e_output.wav")
 
 
 def _connect_ws(url: str, headers: dict):
@@ -51,21 +53,29 @@ async def run_smoke_test():
 
         # Collect audio frames
         received_frames = 0
-        total_pcm_bytes = 0
+        total_pcm_bytes = bytearray()
 
         while received_frames < 4:
             msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
             if isinstance(msg, bytes):
                 received_frames += 1
-                total_pcm_bytes += len(msg)
+                total_pcm_bytes.extend(msg)
                 print(f" Received Audio Frame #{received_frames}: {len(msg)} bytes")
             elif isinstance(msg, str):
                 print(f" Received Control Event: {msg}")
 
         assert received_frames >= 4, f"Expected >= 4 audio frames, received {received_frames}"
-        assert total_pcm_bytes > 0, "Expected non-zero PCM payload"
+        assert len(total_pcm_bytes) > 0, "Expected non-zero PCM payload"
 
-        print(f" Successfully verified {received_frames} audio frames ({total_pcm_bytes} total bytes).")
+        os.makedirs(os.path.dirname(WAV_OUTPUT_PATH), exist_ok=True)
+        with wave.open(WAV_OUTPUT_PATH, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(total_pcm_bytes)
+
+        print(f" Successfully verified {received_frames} audio frames ({len(total_pcm_bytes)} total bytes).")
+        print(f" Wrote live audio recording to {WAV_OUTPUT_PATH}")
 
     # Verify session showed up in /v1/sessions
     try:
