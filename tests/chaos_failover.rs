@@ -90,7 +90,7 @@ impl TtsProviderEndpoint for ChaosMockTtsEndpoint {
             let fundamental_hz = 440.0;
             let amplitude = 10_000.0;
 
-            let total_chunks = 25u64;
+            let total_chunks = if utt_id == 101 { 8u64 } else { 50u64 };
 
             for seq in 0..total_chunks {
                 if provider == ProviderId::PrimaryCartesia && stall_ms > 0 && seq == 4 {
@@ -224,6 +224,9 @@ async fn test_chaos_350ms_primary_stall_zero_drop_sub_18ms_failover() {
 
     tokio::time::sleep(Duration::from_millis(120)).await;
 
+    // Drain warm-up baseline frames so the verification window focuses on the stall & failover
+    while egress_rx.try_recv().is_ok() {}
+
     // Phase 2: Arm a 350ms network stall on Primary and dispatch Utterance 2
     primary.arm_network_stall(350);
 
@@ -283,6 +286,13 @@ async fn test_chaos_350ms_primary_stall_zero_drop_sub_18ms_failover() {
         "Prometheus Metrics Snapshot:\n{}",
         telemetry.render_prometheus_metrics()
     );
+
+    for (i, frame) in collected_frames.iter().enumerate() {
+        println!(
+            "Frame idx={:02} seq={} spliced={} provider={:?} first_val={} last_val={}",
+            i, frame.rtp_sequence, frame.spliced_in_this_frame, frame.active_provider, frame.pcm_samples[0], frame.pcm_samples[239]
+        );
+    }
 
     // ASSERTION A: Failover occurs in under 18 milliseconds (18,000 microseconds)
     assert!(

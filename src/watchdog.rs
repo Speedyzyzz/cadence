@@ -146,6 +146,11 @@ impl LatencyWatchdog {
 
     /// Observes an incoming audio chunk, updating TTFB metrics and RFC 3550 EWMA jitter.
     pub fn observe_chunk(&self, chunk: &AudioChunk) {
+        let active_utt = self.active_utterance_id.load(Ordering::Acquire);
+        if active_utt != 0 && chunk.utterance_id != active_utt {
+            return;
+        }
+
         let arrival_us = chunk.arrival_us;
 
         if chunk.provider == ProviderId::PrimaryCartesia {

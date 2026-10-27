@@ -406,13 +406,18 @@ impl StatefulSplicer {
         } else {
             pcm_samples = match self.active_provider {
                 ProviderId::PrimaryCartesia => {
+                    let had_real_primary = !self.primary_ring.is_empty();
                     let out = self
                         .primary_ring
                         .pop_exact_or_pad(self.frame_samples, &mut self.last_output_sample);
                     self.primary_samples_egressed += self.frame_samples;
-                    // Advance standby playhead debt in lockstep with primary playback
-                    self.standby_playhead_debt += self.frame_samples;
-                    self.settle_standby_playhead_debt();
+
+                    // Keep standby_ring playhead temporally synchronized with primary_ring
+                    // while preserving a 2ms lookbehind window for phase-alignment search.
+                    let lookbehind = self.sample_rate.samples_for_ms(2);
+                    if had_real_primary && self.standby_ring.len() > self.frame_samples + lookbehind {
+                        self.standby_ring.discard_samples(self.frame_samples);
+                    }
                     self.sync_watchdog_buffer_occupancy();
                     out
                 }

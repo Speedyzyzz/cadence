@@ -612,16 +612,24 @@ impl AudioStreamMultiplexer {
     }
 
     /// Re-dispatches the in-flight utterance immediately on the pre-warmed standby socket
-    /// when reactive failover is needed.
+    /// when reactive failover is needed (Disabled or non-shadowed Canary mode).
     pub async fn replay_inflight_to_standby(&self) -> Result<(), CadenceError> {
-        if let Some(req) = self.last_request.read().await.clone() {
-            info!(
-                "Replaying utterance {} to warm standby endpoint",
-                req.utterance_id
-            );
-            self.standby.send_synthesis_request(&req).await?;
+        match self.config.shadowing_strategy {
+            ShadowingStrategy::Full | ShadowingStrategy::PrefixOnly { .. } => {
+                // Standby was already speculatively dispatched; no duplicate replay needed
+                Ok(())
+            }
+            ShadowingStrategy::Canary { .. } | ShadowingStrategy::Disabled => {
+                if let Some(req) = self.last_request.read().await.clone() {
+                    info!(
+                        "Replaying utterance {} to warm standby endpoint",
+                        req.utterance_id
+                    );
+                    self.standby.send_synthesis_request(&req).await?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<(), CadenceError> {

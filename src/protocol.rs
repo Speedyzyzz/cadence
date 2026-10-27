@@ -214,6 +214,7 @@ unsafe impl Send for OpusFrameEncoder {}
 unsafe impl Sync for OpusFrameEncoder {}
 
 #[cfg(feature = "opus-encoding")]
+#[link(name = "opus")]
 extern "C" {
     fn opus_encoder_create(fs: i32, channels: i32, application: i32, error: *mut i32) -> *mut u8;
     fn opus_encode(
