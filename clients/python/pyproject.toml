@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cadence-client"
+version = "0.1.0"
+description = "Async Python client for Cadence Zero-Downtime Real-Time Voice AI Failover Proxy"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [
+    { name = "Cadence Real-Time Systems Engineering", email = "engineering@cadence.audio" },
+]
+dependencies = [
+    "websockets>=12.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/cadence-audio/cadence"
+Repository = "https://github.com/cadence-audio/cadence.git"

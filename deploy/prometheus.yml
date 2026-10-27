@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "cadence"
+    static_configs:
+      - targets: ["cadence:9091"]
+        labels:
+          app: "cadence-voice-proxy"

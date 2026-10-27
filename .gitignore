@@ -1,0 +1,5 @@
+/target
+tests/artifacts/*.wav
+*.swp
+*.swo
+.DS_Store

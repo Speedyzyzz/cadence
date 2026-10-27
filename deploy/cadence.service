@@ -1,0 +1,29 @@
+# /etc/systemd/system/cadence.service
+[Unit]
+Description=Cadence Real-Time Voice AI Failover Proxy & Telemetry Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cadence
+Group=cadence
+Environment="RUST_LOG=info"
+Environment="CADENCE_METRICS_ADDR=0.0.0.0:9091"
+Environment="CADENCE_INGRESS_ADDR=0.0.0.0:8080"
+ExecStart=/usr/local/bin/cadence
+Restart=always
+RestartSec=1
+
+# Real-time POSIX FIFO scheduling and lock-free memory guarantees
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=80
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+[package]
+name = "cadence"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cadence Real-Time Systems Engineering"]
+description = "Open-core zero-downtime failover proxy and DSP splicing plane for real-time voice AI agents"
+license = "Apache-2.0"
+
+[features]
+default = []
+opus-encoding = []
+
+[dependencies]
+tokio = { version = "1.40", features = ["full", "rt-multi-thread", "sync", "time", "net", "macros", "signal"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+crossbeam-queue = "0.3"
+bytes = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+async-trait = "0.1"
+url = "2.5"
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+dashmap = "6"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = false
+
+[profile.release-test]
+inherits = "release"
+panic = "unwind"
