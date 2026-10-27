@@ -1,24 +1,24 @@
 services:
   cadence:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: cadence-proxy
     ports:
       - "8080:8080"
       - "9091:9091"
     environment:
       - RUST_LOG=info
-      - CADENCE_METRICS_ADDR=0.0.0.0:9091
       - CADENCE_INGRESS_ADDR=0.0.0.0:8080
+      - CADENCE_METRICS_ADDR=0.0.0.0:9091
       - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -29,10 +29,8 @@ services:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=24h"
     depends_on:
-      cadence:
-        condition: service_healthy
+      - cadence
     restart: unless-stopped
 
   grafana:
@@ -44,7 +42,9 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=cadence
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
-      - ./deploy/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./deploy/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./deploy/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
     depends_on:
       - prometheus
     restart: unless-stopped

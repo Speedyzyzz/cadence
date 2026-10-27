@@ -37,3 +37,8 @@ strip = false
 [profile.release-test]
 inherits = "release"
 panic = "unwind"
+
+[[bench]]
+name = "scale_10k"
+harness = false
+

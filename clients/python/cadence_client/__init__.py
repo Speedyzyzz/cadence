@@ -8,10 +8,21 @@ zero-downtime failover proxy. Compatible with LiveKit Agents and Pipecat.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
 from typing import AsyncGenerator, Optional, Tuple, Union
 import websockets
+
+
+def _connect_ws(url: str, headers: dict, **kwargs):
+    sig = inspect.signature(websockets.connect)
+    if headers:
+        if "additional_headers" in sig.parameters:
+            kwargs["additional_headers"] = headers
+        elif "extra_headers" in sig.parameters:
+            kwargs["extra_headers"] = headers
+    return websockets.connect(url, **kwargs)
 
 
 class CadenceClient:
@@ -47,7 +58,7 @@ class CadenceClient:
             "X-Cadence-Session-Id": self.session_id,
             **self.extra_headers,
         }
-        self._ws = await websockets.connect(self.url, extra_headers=headers)
+        self._ws = await _connect_ws(self.url, headers=headers)
         return self
 
     async def __aenter__(self) -> CadenceClient:
