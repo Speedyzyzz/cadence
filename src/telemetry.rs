@@ -130,7 +130,9 @@ impl RollingTtfbRing {
             .collect();
         vals.sort_unstable();
 
-        let idx_95 = ((n as f64 * 0.95).ceil() as usize).saturating_sub(1).min(n - 1);
+        let idx_95 = ((n as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(n - 1);
         vals[idx_95]
     }
 }
@@ -370,7 +372,8 @@ impl TelemetryCollector {
         let _ = writeln!(
             out,
             "cadence_failover_switches_total{{reason=\"predictive_jitter_underrun\"}} {}",
-            self.failover_predictive_jitter_total.load(Ordering::Relaxed)
+            self.failover_predictive_jitter_total
+                .load(Ordering::Relaxed)
         );
         let _ = writeln!(
             out,
@@ -383,7 +386,11 @@ impl TelemetryCollector {
             "# HELP cadence_saved_calls_total Total voice sessions saved via zero-drop hot splice."
         );
         let _ = writeln!(out, "# TYPE cadence_saved_calls_total counter");
-        let _ = writeln!(out, "cadence_saved_calls_total {}", self.saved_calls_count());
+        let _ = writeln!(
+            out,
+            "cadence_saved_calls_total {}",
+            self.saved_calls_count()
+        );
 
         let _ = writeln!(
             out,

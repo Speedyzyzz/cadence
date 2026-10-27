@@ -28,7 +28,10 @@ fn main() {
     let clock = MonotonicClock::new();
     let telemetry = Arc::new(TelemetryCollector::new());
 
-    println!("Initializing {} concurrent splicer & watchdog sessions...", stream_count);
+    println!(
+        "Initializing {} concurrent splicer & watchdog sessions...",
+        stream_count
+    );
     let init_start = Instant::now();
 
     let mut sessions = Vec::with_capacity(stream_count);
@@ -68,7 +71,11 @@ fn main() {
     }
 
     let init_elapsed = init_start.elapsed();
-    println!("Initialized {} sessions in {:.2}ms", stream_count, init_elapsed.as_secs_f64() * 1000.0);
+    println!(
+        "Initialized {} sessions in {:.2}ms",
+        stream_count,
+        init_elapsed.as_secs_f64() * 1000.0
+    );
 
     // Benchmark Phase 1: Steady-state 10ms frame extraction across 10,000 streams
     println!("\n[Phase 1] Processing steady-state audio frames across 10,000 streams...");
@@ -134,15 +141,24 @@ fn main() {
         total_spliced_frames,
         p2_elapsed.as_secs_f64() * 1000.0
     );
-    println!("Average splice execution overhead: {:.2} µs/session", avg_splice_us);
+    println!(
+        "Average splice execution overhead: {:.2} µs/session",
+        avg_splice_us
+    );
 
     println!("\n==================================================================");
     println!(" SCALE BENCHMARK SUMMARY");
     println!(" Total Concurrent Streams : {}", stream_count);
     println!(" Egress Frame Throughput  : {:.0} frames/sec", p1_fps);
     println!(" Average Splice Overhead  : {:.2} µs", avg_splice_us);
-    println!(" Saved Sessions Counter   : {}", telemetry.saved_calls_count());
-    println!(" Total Dropped Frames     : {}", telemetry.dropped_frames_count());
+    println!(
+        " Saved Sessions Counter   : {}",
+        telemetry.saved_calls_count()
+    );
+    println!(
+        " Total Dropped Frames     : {}",
+        telemetry.dropped_frames_count()
+    );
     println!(" Status                   : PASSED (Zero dropped frames, Sub-microsecond DSP)");
     println!("==================================================================");
 }

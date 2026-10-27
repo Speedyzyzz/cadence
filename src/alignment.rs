@@ -125,7 +125,11 @@ impl WordAlignmentIndex {
             let end_sample = self.seconds_to_samples(end_sec) + self.chunk_base_offset;
 
             // Avoid duplicates if the same timestamp set is received multiple times
-            if self.words.last().map_or(true, |last| last.start_sample != start_sample) {
+            if self
+                .words
+                .last()
+                .map_or(true, |last| last.start_sample != start_sample)
+            {
                 self.words.push(WordBoundary {
                     word,
                     start_sample,
@@ -247,7 +251,9 @@ impl WordAlignmentIndex {
         let primary_word_idx = primary_alignment
             .words
             .iter()
-            .position(|w| primary_sample_offset >= w.start_sample && primary_sample_offset <= w.end_sample)
+            .position(|w| {
+                primary_sample_offset >= w.start_sample && primary_sample_offset <= w.end_sample
+            })
             .or_else(|| {
                 // If between words, find the nearest preceding word boundary
                 primary_alignment
@@ -259,7 +265,10 @@ impl WordAlignmentIndex {
         let primary_word = &primary_alignment.words[primary_word_idx];
 
         // Calculate intra-word progress ρ
-        let word_duration_samples = primary_word.end_sample.saturating_sub(primary_word.start_sample).max(1);
+        let word_duration_samples = primary_word
+            .end_sample
+            .saturating_sub(primary_word.start_sample)
+            .max(1);
         let progress_within_word = primary_sample_offset.saturating_sub(primary_word.start_sample);
         let rho = (progress_within_word as f64) / (word_duration_samples as f64);
         let rho = rho.clamp(0.0, 1.0);
@@ -269,8 +278,11 @@ impl WordAlignmentIndex {
         let standby_word = &self.words[standby_word_idx];
 
         // Compute standby offset at the same fractional progress within the word
-        let standby_word_duration = standby_word.end_sample.saturating_sub(standby_word.start_sample);
-        let standby_raw_offset = standby_word.start_sample + ((standby_word_duration as f64 * rho) as usize);
+        let standby_word_duration = standby_word
+            .end_sample
+            .saturating_sub(standby_word.start_sample);
+        let standby_raw_offset =
+            standby_word.start_sample + ((standby_word_duration as f64 * rho) as usize);
 
         // Refine by searching for the nearest low-energy RMS valley
         let final_offset = if let Some(samples) = standby_samples {
@@ -373,6 +385,9 @@ mod tests {
             }
         }
         let valley = find_rms_valley(&samples, 240, 2, SampleRate::Hz24000);
-        assert!(valley >= 200 && valley <= 280, "Valley should be in quiet region, got {valley}");
+        assert!(
+            valley >= 200 && valley <= 280,
+            "Valley should be in quiet region, got {valley}"
+        );
     }
 }

@@ -213,9 +213,7 @@ impl LatencyWatchdog {
         // Trigger Condition 1: Time-to-First-Byte (TTFB) > 120ms after LLM token dispatch
         if self.awaiting_first_byte.load(Ordering::Acquire) {
             let dispatch_us = self.utterance_dispatch_us.load(Ordering::Acquire);
-            if dispatch_us > 0
-                && now_us.saturating_sub(dispatch_us) > self.thresholds.max_ttfb_us
-            {
+            if dispatch_us > 0 && now_us.saturating_sub(dispatch_us) > self.thresholds.max_ttfb_us {
                 return self.try_trigger_failover(
                     utterance_id,
                     now_us,
@@ -259,11 +257,7 @@ impl LatencyWatchdog {
         utterance_id: u64,
         now_us: u64,
     ) -> Option<FailoverSignal> {
-        self.try_trigger_failover(
-            utterance_id,
-            now_us,
-            FailoverReason::PrimarySocketClosed,
-        )
+        self.try_trigger_failover(utterance_id, now_us, FailoverReason::PrimarySocketClosed)
     }
 
     fn try_trigger_failover(

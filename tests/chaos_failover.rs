@@ -290,7 +290,12 @@ async fn test_chaos_350ms_primary_stall_zero_drop_sub_18ms_failover() {
     for (i, frame) in collected_frames.iter().enumerate() {
         println!(
             "Frame idx={:02} seq={} spliced={} provider={:?} first_val={} last_val={}",
-            i, frame.rtp_sequence, frame.spliced_in_this_frame, frame.active_provider, frame.pcm_samples[0], frame.pcm_samples[239]
+            i,
+            frame.rtp_sequence,
+            frame.spliced_in_this_frame,
+            frame.active_provider,
+            frame.pcm_samples[0],
+            frame.pcm_samples[239]
         );
     }
 

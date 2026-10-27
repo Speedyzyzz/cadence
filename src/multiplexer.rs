@@ -56,8 +56,7 @@ impl WebSocketTtsEndpoint {
         endpoint_url: String,
         api_key: String,
         sample_rate: SampleRate,
-        #[allow(dead_code)]
-    clock: MonotonicClock,
+        #[allow(dead_code)] clock: MonotonicClock,
         chunk_sink: mpsc::Sender<AudioChunk>,
         telemetry: Arc<TelemetryCollector>,
     ) -> Result<Arc<Self>, CadenceError> {
@@ -412,9 +411,7 @@ pub enum ShadowingStrategy {
         cancel_after_primary_ttfb: bool,
     },
     /// Only shadow when primary rolling p95 TTFB exceeds the healthy ceiling (e.g. 75ms).
-    Canary {
-        healthy_ttfb_ceiling_us: u64,
-    },
+    Canary { healthy_ttfb_ceiling_us: u64 },
     /// No speculative shadowing; in-flight requests are replayed reactively on socket drop.
     Disabled,
 }
@@ -466,8 +463,7 @@ impl AudioStreamMultiplexer {
         standby: Arc<dyn TtsProviderEndpoint>,
         watchdog: Arc<LatencyWatchdog>,
         telemetry: Arc<TelemetryCollector>,
-        #[allow(dead_code)]
-    clock: MonotonicClock,
+        #[allow(dead_code)] clock: MonotonicClock,
     ) -> Arc<Self> {
         let mux = Arc::new(Self {
             config,

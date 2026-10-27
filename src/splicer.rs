@@ -260,7 +260,8 @@ impl StatefulSplicer {
                 if let Some(ref al_json) = chunk.alignment_json {
                     self.primary_alignment.ingest_cartesia_timestamps(al_json);
                 }
-                self.primary_alignment.advance_sample_count(chunk_samples_len);
+                self.primary_alignment
+                    .advance_sample_count(chunk_samples_len);
                 self.primary_ring.push_samples(&chunk.samples);
                 if !self.primed && self.primary_ring.len() >= self.holdback_target_samples {
                     self.primed = true;
@@ -271,7 +272,8 @@ impl StatefulSplicer {
                 if let Some(ref al_json) = chunk.alignment_json {
                     self.standby_alignment.ingest_elevenlabs_alignment(al_json);
                 }
-                self.standby_alignment.advance_sample_count(chunk_samples_len);
+                self.standby_alignment
+                    .advance_sample_count(chunk_samples_len);
                 self.standby_ring.push_samples(&chunk.samples);
                 self.settle_standby_playhead_debt();
                 if !self.primed && self.standby_ring.len() >= self.holdback_target_samples {
@@ -339,12 +341,18 @@ impl StatefulSplicer {
             let word_splice_point = self.standby_alignment.find_splice_point(
                 self.primary_samples_egressed,
                 &self.primary_alignment,
-                if standby_peek.is_empty() { None } else { Some(&standby_peek) },
+                if standby_peek.is_empty() {
+                    None
+                } else {
+                    Some(&standby_peek)
+                },
             );
 
             if let Some(sp) = word_splice_point {
                 // If word alignment found an offset, align standby ring read position
-                if sp.standby_sample_offset > 0 && sp.standby_sample_offset < self.standby_ring.len() {
+                if sp.standby_sample_offset > 0
+                    && sp.standby_sample_offset < self.standby_ring.len()
+                {
                     self.standby_ring.discard_samples(sp.standby_sample_offset);
                 }
             } else {
@@ -361,8 +369,12 @@ impl StatefulSplicer {
                 .pop_exact_or_pad(fade_len, &mut self.last_output_sample);
 
             // Inspect standby ring to align phase before consuming
-            let standby_peek_search = self.standby_ring.peek_slice(fade_len + self.sample_rate.samples_for_ms(2));
-            let optimal_lag = self.dsp.find_optimal_phase_offset(&primary_tail, &standby_peek_search);
+            let standby_peek_search = self
+                .standby_ring
+                .peek_slice(fade_len + self.sample_rate.samples_for_ms(2));
+            let optimal_lag = self
+                .dsp
+                .find_optimal_phase_offset(&primary_tail, &standby_peek_search);
             phase_offset_samples = optimal_lag;
 
             if optimal_lag > 0 {
@@ -415,7 +427,8 @@ impl StatefulSplicer {
                     // Keep standby_ring playhead temporally synchronized with primary_ring
                     // while preserving a 2ms lookbehind window for phase-alignment search.
                     let lookbehind = self.sample_rate.samples_for_ms(2);
-                    if had_real_primary && self.standby_ring.len() > self.frame_samples + lookbehind {
+                    if had_real_primary && self.standby_ring.len() > self.frame_samples + lookbehind
+                    {
                         self.standby_ring.discard_samples(self.frame_samples);
                     }
                     self.sync_watchdog_buffer_occupancy();

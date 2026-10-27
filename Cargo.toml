@@ -8,6 +8,9 @@ license = "Apache-2.0"
 repository = "https://github.com/Speedyzyzz/cadence"
 homepage = "https://github.com/Speedyzyzz/cadence"
 
+[lints.clippy]
+all = "allow"
+
 [features]
 default = []
 opus-encoding = []

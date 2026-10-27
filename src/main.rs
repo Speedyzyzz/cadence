@@ -1,6 +1,7 @@
 //! src/main.rs
 //! Production daemon entrypoint for the Cadence Real-Time Voice Failover Proxy.
 
+use async_trait::async_trait;
 use cadence::multiplexer::{
     AudioStreamMultiplexer, MultiplexerConfig, ShadowingStrategy, TtsProviderEndpoint,
 };
@@ -11,7 +12,6 @@ use cadence::server::run_ingress_server;
 use cadence::splicer::StatefulSplicer;
 use cadence::telemetry::{spawn_prometheus_http_exporter, TelemetryCollector};
 use cadence::watchdog::{LatencyWatchdog, WatchdogThresholds};
-use async_trait::async_trait;
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -119,7 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ingress_bind = std::env::var("CADENCE_INGRESS_ADDR").ok();
 
     if let Some(ref bind_addr) = ingress_bind {
-        info!("Starting Cadence Multi-Session Ingress Server on {}", bind_addr);
+        info!(
+            "Starting Cadence Multi-Session Ingress Server on {}",
+            bind_addr
+        );
         run_ingress_server(bind_addr, telemetry, clock).await?;
         return Ok(());
     }

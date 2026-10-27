@@ -218,75 +218,73 @@ async fn handle_session_socket(socket: WebSocket, session_id: String, state: App
     let splicer_h = splicer.spawn_realtime_loop(splicer_chunk_rx, failover_rx, egress_tx);
 
     // Initialize TTS endpoints: try connecting to configured WS endpoints; fall back to loopback mock
-    let primary_endpoint: Arc<dyn TtsProviderEndpoint> =
-        if !state.default_primary_ws.is_empty() {
-            match WebSocketTtsEndpoint::connect(
-                ProviderId::PrimaryCartesia,
-                state.default_primary_ws.clone(),
-                std::env::var("CARTESIA_API_KEY").unwrap_or_default(),
-                SampleRate::Hz24000,
-                state.clock.clone(),
-                ingress_chunk_tx.clone(),
-                Arc::clone(&state.telemetry),
-            )
-            .await
-            {
-                Ok(ep) => ep,
-                Err(e) => {
-                    warn!("Primary WS connection failed ({e}); using local loopback synthesizer");
-                    Arc::new(LocalLoopbackEndpoint {
-                        provider: ProviderId::PrimaryCartesia,
-                        sample_rate: SampleRate::Hz24000,
-                        clock: state.clock.clone(),
-                        chunk_tx: ingress_chunk_tx.clone(),
-                        healthy: AtomicBool::new(true),
-                    })
-                }
+    let primary_endpoint: Arc<dyn TtsProviderEndpoint> = if !state.default_primary_ws.is_empty() {
+        match WebSocketTtsEndpoint::connect(
+            ProviderId::PrimaryCartesia,
+            state.default_primary_ws.clone(),
+            std::env::var("CARTESIA_API_KEY").unwrap_or_default(),
+            SampleRate::Hz24000,
+            state.clock.clone(),
+            ingress_chunk_tx.clone(),
+            Arc::clone(&state.telemetry),
+        )
+        .await
+        {
+            Ok(ep) => ep,
+            Err(e) => {
+                warn!("Primary WS connection failed ({e}); using local loopback synthesizer");
+                Arc::new(LocalLoopbackEndpoint {
+                    provider: ProviderId::PrimaryCartesia,
+                    sample_rate: SampleRate::Hz24000,
+                    clock: state.clock.clone(),
+                    chunk_tx: ingress_chunk_tx.clone(),
+                    healthy: AtomicBool::new(true),
+                })
             }
-        } else {
-            Arc::new(LocalLoopbackEndpoint {
-                provider: ProviderId::PrimaryCartesia,
-                sample_rate: SampleRate::Hz24000,
-                clock: state.clock.clone(),
-                chunk_tx: ingress_chunk_tx.clone(),
-                healthy: AtomicBool::new(true),
-            })
-        };
+        }
+    } else {
+        Arc::new(LocalLoopbackEndpoint {
+            provider: ProviderId::PrimaryCartesia,
+            sample_rate: SampleRate::Hz24000,
+            clock: state.clock.clone(),
+            chunk_tx: ingress_chunk_tx.clone(),
+            healthy: AtomicBool::new(true),
+        })
+    };
 
-    let standby_endpoint: Arc<dyn TtsProviderEndpoint> =
-        if !state.default_standby_ws.is_empty() {
-            match WebSocketTtsEndpoint::connect(
-                ProviderId::StandbyElevenLabs,
-                state.default_standby_ws.clone(),
-                std::env::var("ELEVENLABS_API_KEY").unwrap_or_default(),
-                SampleRate::Hz24000,
-                state.clock.clone(),
-                ingress_chunk_tx.clone(),
-                Arc::clone(&state.telemetry),
-            )
-            .await
-            {
-                Ok(ep) => ep,
-                Err(e) => {
-                    warn!("Standby WS connection failed ({e}); using local loopback synthesizer");
-                    Arc::new(LocalLoopbackEndpoint {
-                        provider: ProviderId::StandbyElevenLabs,
-                        sample_rate: SampleRate::Hz24000,
-                        clock: state.clock.clone(),
-                        chunk_tx: ingress_chunk_tx,
-                        healthy: AtomicBool::new(true),
-                    })
-                }
+    let standby_endpoint: Arc<dyn TtsProviderEndpoint> = if !state.default_standby_ws.is_empty() {
+        match WebSocketTtsEndpoint::connect(
+            ProviderId::StandbyElevenLabs,
+            state.default_standby_ws.clone(),
+            std::env::var("ELEVENLABS_API_KEY").unwrap_or_default(),
+            SampleRate::Hz24000,
+            state.clock.clone(),
+            ingress_chunk_tx.clone(),
+            Arc::clone(&state.telemetry),
+        )
+        .await
+        {
+            Ok(ep) => ep,
+            Err(e) => {
+                warn!("Standby WS connection failed ({e}); using local loopback synthesizer");
+                Arc::new(LocalLoopbackEndpoint {
+                    provider: ProviderId::StandbyElevenLabs,
+                    sample_rate: SampleRate::Hz24000,
+                    clock: state.clock.clone(),
+                    chunk_tx: ingress_chunk_tx,
+                    healthy: AtomicBool::new(true),
+                })
             }
-        } else {
-            Arc::new(LocalLoopbackEndpoint {
-                provider: ProviderId::StandbyElevenLabs,
-                sample_rate: SampleRate::Hz24000,
-                clock: state.clock.clone(),
-                chunk_tx: ingress_chunk_tx,
-                healthy: AtomicBool::new(true),
-            })
-        };
+        }
+    } else {
+        Arc::new(LocalLoopbackEndpoint {
+            provider: ProviderId::StandbyElevenLabs,
+            sample_rate: SampleRate::Hz24000,
+            clock: state.clock.clone(),
+            chunk_tx: ingress_chunk_tx,
+            healthy: AtomicBool::new(true),
+        })
+    };
 
     let multiplexer = AudioStreamMultiplexer::new(
         MultiplexerConfig {
@@ -326,7 +324,9 @@ async fn handle_session_socket(socket: WebSocket, session_id: String, state: App
                     "pts_us": frame.pts_us,
                     "phase_offset_samples": frame.phase_offset_samples,
                 });
-                let _ = client_ws_tx.send(Message::Text(event_json.to_string())).await;
+                let _ = client_ws_tx
+                    .send(Message::Text(event_json.to_string()))
+                    .await;
             }
         }
     });
