@@ -72,6 +72,7 @@ class CadenceStreamSession:
         self._ws: Optional[object] = None
         self._closed = False
         self._seq_counter = 0
+        self._reconnect_before_next_utterance = False
 
     async def connect(self) -> CadenceStreamSession:
         headers = {
@@ -99,6 +100,13 @@ class CadenceStreamSession:
         flush: Optional[bool] = None,
     ) -> int:
         """Dispatches an LLM text clause to Cadence for speculative synthesis."""
+        # Transparent inter-utterance migration when the previous node entered SIGTERM drain
+        if self._reconnect_before_next_utterance:
+            await self.close()
+            self._closed = False
+            self._reconnect_before_next_utterance = False
+            await self.connect()
+
         if self._ws is None or self._closed:
             raise RuntimeError("CadenceStreamSession is not connected")
 
@@ -162,6 +170,13 @@ class CadenceStreamSession:
                 elif isinstance(msg, str):
                     try:
                         event = json.loads(msg)
+                        if event.get("type") == "reconnect_hint" and event.get("drain") is True:
+                            logger.info(
+                                "Received reconnect_hint drain signal from Cadence node for session %s; will reconnect on next utterance",
+                                self.session_id,
+                            )
+                            self._reconnect_before_next_utterance = True
+                            continue
                         if event.get("event") == "failover_triggered":
                             logger.warning(
                                 "Cadence hot failover triggered on session %s: reason=%s",
@@ -181,6 +196,19 @@ class CadenceStreamSession:
             except Exception:
                 pass
             self._ws = None
+
+    async def aclose(self) -> None:
+        """Async close alias."""
+        await self.close()
+
+    async def send_segment(self, text: str, *, flush: bool = True) -> int:
+        """Alias for send_synthesis."""
+        return await self.send_synthesis(text, flush=flush)
+
+    async def iter_frames(self) -> AsyncGenerator[RawPcmFrame, None]:
+        """Alias for receive_frames."""
+        async for frame in self.receive_frames():
+            yield frame
 
 
 # LiveKit Agents optional plugin adapter

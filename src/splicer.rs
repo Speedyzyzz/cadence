@@ -83,6 +83,46 @@ impl PcmRingBuffer {
     }
 }
 
+/// Matches the Root-Mean-Square (RMS) acoustic energy of the incoming standby stream
+/// to the active primary tail, preventing a 3dB-6dB loudness jump during provider failover.
+/// Returns the applied linear gain factor $G \in [0.4, 2.5]$.
+pub fn normalize_standby_rms_gain(primary_tail: &[i16], standby_slice: &mut [i16]) -> f64 {
+    if primary_tail.is_empty() || standby_slice.is_empty() {
+        return 1.0;
+    }
+
+    let p_mean_sq: f64 = primary_tail
+        .iter()
+        .map(|&s| (s as f64) * (s as f64))
+        .sum::<f64>()
+        / (primary_tail.len() as f64);
+
+    let s_mean_sq: f64 = standby_slice
+        .iter()
+        .map(|&s| (s as f64) * (s as f64))
+        .sum::<f64>()
+        / (standby_slice.len() as f64);
+
+    let p_rms = p_mean_sq.sqrt();
+    let s_rms = s_mean_sq.sqrt();
+
+    // Guard against silence in standby or primary (< -60 dBFS)
+    if s_rms < 32.0 || p_rms < 32.0 {
+        return 1.0;
+    }
+
+    // Target linear gain G = RMS_primary / RMS_standby, clamped to [0.4x, 2.5x] (-8dB to +8dB)
+    let raw_gain = p_rms / s_rms;
+    let clamped_gain = raw_gain.clamp(0.4, 2.5);
+
+    for s in standby_slice.iter_mut() {
+        let scaled = (*s as f64) * clamped_gain;
+        *s = scaled.round().clamp(-32768.0, 32767.0) as i16;
+    }
+
+    clamped_gain
+}
+
 /// Precomputed Raised-Cosine (Hann) 5ms crossfade window weights and phase correlator.
 pub struct CrossfadeDspEngine {
     fade_samples: usize,
@@ -191,6 +231,7 @@ pub struct StatefulSplicer {
     pending_splice: bool,
     primed: bool,
     last_output_sample: i16,
+    pub last_rms_gain: f64,
     next_pts_us: u64,
     clock: MonotonicClock,
     watchdog: Arc<LatencyWatchdog>,
@@ -229,6 +270,7 @@ impl StatefulSplicer {
             pending_splice: false,
             primed: false,
             last_output_sample: 0,
+            last_rms_gain: 1.0,
             next_pts_us: 0,
             clock,
             watchdog,
@@ -381,17 +423,23 @@ impl StatefulSplicer {
                 self.standby_ring.discard_samples(optimal_lag);
             }
 
-            let standby_fade_head = self
+            let mut standby_fade_head = self
                 .standby_ring
                 .pop_exact_or_pad(fade_len, &mut self.last_output_sample);
 
-            // Synthesize 5ms raised-cosine crossfaded segment
-            let mut crossfaded = self.dsp.crossfade_5ms(&primary_tail, &standby_fade_head);
-
-            // Append remaining 5ms directly from the newly promoted standby stream
-            let standby_remainder = self
+            let mut standby_remainder = self
                 .standby_ring
                 .pop_exact_or_pad(remainder_len, &mut self.last_output_sample);
+
+            let mut combined_standby = Vec::with_capacity(fade_len + remainder_len);
+            combined_standby.extend_from_slice(&standby_fade_head);
+            combined_standby.extend_from_slice(&standby_remainder);
+            self.last_rms_gain = normalize_standby_rms_gain(&primary_tail, &mut combined_standby);
+            standby_fade_head.copy_from_slice(&combined_standby[..fade_len]);
+            standby_remainder.copy_from_slice(&combined_standby[fade_len..]);
+
+            // Synthesize 5ms raised-cosine crossfaded segment
+            let mut crossfaded = self.dsp.crossfade_5ms(&primary_tail, &standby_fade_head);
             crossfaded.extend_from_slice(&standby_remainder);
 
             if let Some(&last) = crossfaded.last() {

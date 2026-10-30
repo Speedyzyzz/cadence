@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Bala Vignesh <223624105+Speedyzyzz@users.noreply.github.com>"]
 description = "Open-core zero-downtime failover proxy and DSP splicing plane for real-time voice AI agents"
