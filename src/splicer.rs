@@ -1,12 +1,12 @@
 //! src/splicer.rs
-//! Module B: Stateful Splicer & 40ms Jitter Buffer.
-//! Buffers 40ms of live PCM audio frames, synchronizes playhead positions across primary
-//! and shadow standby rings via `standby_playhead_debt` and `WordAlignmentIndex`,
-//! reports real-time buffer occupancy B(t_now) to the Watchdog, and executes a
-//! phase-aligned 5ms raised-cosine (Hann) crossfade interpolation when hot-splicing
-//! providers mid-sentence.
+//! Module B: Stateful Splicer, 40ms Holdback Ring Buffer, RMS Loudness Normalizer,
+//! 450ms Acoustic Backchannel Injector, Binary Oscilloscope Tap, and Phase-Aligned 5ms Hann Crossfader.
 
 use crate::alignment::WordAlignmentIndex;
+use crate::backchannel::{
+    BackchannelController, BackchannelPhase, DEFAULT_BACKCHANNEL_THRESHOLD_US,
+};
+use crate::inspector_tap::{InspectorTapHub, InspectorTapPacket};
 use crate::protocol::{
     AudioChunk, EgressAudioFrame, FailoverSignal, MonotonicClock, ProviderId, RtpOpusPacketizer,
     SampleRate,
@@ -59,7 +59,6 @@ impl PcmRingBuffer {
                 *last_sample = s;
                 out.push(s);
             } else {
-                // Exponential decay damping on last sample to prevent DC shelf pop
                 *last_sample = ((*last_sample as i32 * 31) / 32) as i16;
                 out.push(*last_sample);
             }
@@ -83,8 +82,8 @@ impl PcmRingBuffer {
     }
 }
 
-/// Matches the Root-Mean-Square (RMS) acoustic energy of the incoming standby stream
-/// to the active primary tail, preventing a 3dB-6dB loudness jump during provider failover.
+/// Matches the Root-Mean-Square (RMS) acoustic energy of the incoming stream
+/// to the active tail, preventing a 3dB-6dB loudness jump during provider or backchannel splices.
 /// Returns the applied linear gain factor $G \in [0.4, 2.5]$.
 pub fn normalize_standby_rms_gain(primary_tail: &[i16], standby_slice: &mut [i16]) -> f64 {
     if primary_tail.is_empty() || standby_slice.is_empty() {
@@ -133,9 +132,7 @@ pub struct CrossfadeDspEngine {
 
 impl CrossfadeDspEngine {
     pub fn new(sample_rate: SampleRate) -> Self {
-        // 5ms window -> 120 samples @ 24kHz, 240 samples @ 48kHz
         let fade_samples = sample_rate.samples_for_ms(5);
-        // 2ms phase-alignment search window -> 48 samples @ 24kHz, 96 samples @ 48kHz
         let max_phase_search_samples = sample_rate.samples_for_ms(2);
 
         let mut weights_out = Vec::with_capacity(fade_samples);
@@ -162,8 +159,6 @@ impl CrossfadeDspEngine {
         self.fade_samples
     }
 
-    /// Finds the optimal sample lag `delta` in `[0, max_phase_search_samples]` that maximizes
-    /// cross-correlation between `primary_tail` and `standby_head`, eliminating phase cancellation.
     pub fn find_optimal_phase_offset(&self, primary_tail: &[i16], standby_head: &[i16]) -> usize {
         let n_fade = self.fade_samples.min(primary_tail.len());
         if n_fade == 0 || standby_head.len() <= n_fade {
@@ -193,7 +188,6 @@ impl CrossfadeDspEngine {
         best_lag
     }
 
-    /// Executes the 5ms raised-cosine crossfade between `primary_tail` and phase-aligned `standby_head`.
     pub fn crossfade_5ms(&self, primary_tail: &[i16], standby_aligned: &[i16]) -> Vec<i16> {
         let len = self
             .fade_samples
@@ -213,7 +207,7 @@ impl CrossfadeDspEngine {
     }
 }
 
-/// Module B: Stateful Splicer & 40ms Jitter Buffer.
+/// Module B: Stateful Splicer & 40ms Jitter Buffer with Backchannel & Binary WS Tap.
 pub struct StatefulSplicer {
     sample_rate: SampleRate,
     frame_duration_ms: u32,
@@ -229,6 +223,7 @@ pub struct StatefulSplicer {
     packetizer: RtpOpusPacketizer,
     active_provider: ProviderId,
     pending_splice: bool,
+    pending_backchannel_to_tts_splice: bool,
     primed: bool,
     last_output_sample: i16,
     pub last_rms_gain: f64,
@@ -236,6 +231,8 @@ pub struct StatefulSplicer {
     clock: MonotonicClock,
     watchdog: Arc<LatencyWatchdog>,
     telemetry: Arc<TelemetryCollector>,
+    backchannel: BackchannelController,
+    inspector_tap: Option<Arc<InspectorTapHub>>,
 }
 
 impl StatefulSplicer {
@@ -246,11 +243,9 @@ impl StatefulSplicer {
         watchdog: Arc<LatencyWatchdog>,
         telemetry: Arc<TelemetryCollector>,
     ) -> Self {
-        let frame_duration_ms = 10; // 10ms real-time pacing ticks (240 samples @ 24kHz, 480 @ 48kHz)
+        let frame_duration_ms = 10;
         let frame_samples = sample_rate.samples_for_ms(frame_duration_ms);
-        // 40ms jitter buffer holdback target (960 samples @ 24kHz, 1920 @ 48kHz)
         let holdback_target_samples = sample_rate.samples_for_ms(40);
-        // Ring capacity accommodates up to 500ms of burst synthesis chunks without overflow
         let max_ring_samples = sample_rate.samples_for_ms(500);
 
         Self {
@@ -268,6 +263,7 @@ impl StatefulSplicer {
             packetizer: RtpOpusPacketizer::new(ssrc, 111),
             active_provider: ProviderId::PrimaryCartesia,
             pending_splice: false,
+            pending_backchannel_to_tts_splice: false,
             primed: false,
             last_output_sample: 0,
             last_rms_gain: 1.0,
@@ -275,7 +271,49 @@ impl StatefulSplicer {
             clock,
             watchdog,
             telemetry,
+            backchannel: BackchannelController::new(sample_rate),
+            inspector_tap: None,
         }
+    }
+
+    /// Attaches a real-time binary WebSocket tap hub (`WS /v1/inspector/ws`) to this splicer.
+    pub fn with_inspector_tap(mut self, tap: Arc<InspectorTapHub>) -> Self {
+        self.inspector_tap = Some(tap);
+        self
+    }
+
+    pub fn set_inspector_tap(&mut self, tap: Arc<InspectorTapHub>) {
+        self.inspector_tap = Some(tap);
+    }
+
+    /// Arms the 450ms LLM TTFT backchannel timer at the start of a user-to-agent turn.
+    pub fn arm_llm_turn_wait(&mut self, utterance_id: u64, turn_start_us: u64) {
+        self.backchannel.arm_turn_wait(
+            utterance_id,
+            turn_start_us,
+            DEFAULT_BACKCHANNEL_THRESHOLD_US,
+        );
+    }
+
+    /// Arms the LLM TTFT backchannel timer with a custom microsecond threshold.
+    pub fn arm_llm_turn_wait_with_threshold(
+        &mut self,
+        utterance_id: u64,
+        turn_start_us: u64,
+        threshold_us: u64,
+    ) {
+        self.backchannel
+            .arm_turn_wait(utterance_id, turn_start_us, threshold_us);
+    }
+
+    #[inline(always)]
+    pub fn is_backchannel_active(&self) -> bool {
+        self.backchannel.is_active()
+    }
+
+    #[inline(always)]
+    pub fn last_rms_gain(&self) -> f64 {
+        self.last_rms_gain
     }
 
     #[inline(always)]
@@ -293,7 +331,25 @@ impl StatefulSplicer {
         }
     }
 
+    /// Evaluates at timestamp `now_us` whether the 450ms LLM TTFT threshold has been breached.
+    pub fn evaluate_backchannel_at(&mut self, now_us: u64) -> bool {
+        let triggered = self
+            .backchannel
+            .evaluate_and_maybe_trigger(now_us, self.primary_ring.is_empty());
+        if triggered {
+            self.primed = true;
+            self.telemetry.record_backchannel_injected();
+            info!(
+                now_us,
+                "450ms LLM TTFT stall detected; injecting prosodic backchannel audio"
+            );
+        }
+        triggered
+    }
+
     /// Ingests an upstream PCM chunk into the corresponding provider ring buffer.
+    /// If the backchannel filler is currently playing, arms a 5ms Hann crossfade from the
+    /// backchannel tail into the newly arrived live TTS stream.
     pub fn ingest_chunk(&mut self, chunk: AudioChunk) {
         let chunk_samples_len = chunk.samples.len();
 
@@ -305,6 +361,17 @@ impl StatefulSplicer {
                 self.primary_alignment
                     .advance_sample_count(chunk_samples_len);
                 self.primary_ring.push_samples(&chunk.samples);
+
+                if self.backchannel.is_active() {
+                    self.pending_backchannel_to_tts_splice = true;
+                } else if matches!(
+                    self.backchannel.phase(),
+                    BackchannelPhase::ArmedWaitingForLlm { .. }
+                ) {
+                    // Real TTS arrived before the 450ms deadline; cancel the backchannel timer
+                    self.backchannel.cancel();
+                }
+
                 if !self.primed && self.primary_ring.len() >= self.holdback_target_samples {
                     self.primed = true;
                 }
@@ -364,18 +431,91 @@ impl StatefulSplicer {
         }
     }
 
-    /// Produces a single 10ms egress frame. Executes the 5ms raised-cosine crossfade
-    /// if `pending_splice` is armed. Returns `None` only before the stream is initially primed.
+    /// Produces a single 10ms egress frame, executing backchannel emission, backchannel->TTS
+    /// 5ms Hann crossfading, or Primary->Standby 5ms Hann crossfading as needed.
     pub fn pull_10ms_egress_frame(&mut self, trigger_us: Option<u64>) -> Option<EgressAudioFrame> {
+        let now_us = self.clock.now_us();
+        self.evaluate_backchannel_at(now_us);
+
         if !self.primed {
             return None;
         }
 
+        // Capture peek snapshots for the live oscilloscope tap before popping
+        let has_tap = self
+            .inspector_tap
+            .as_ref()
+            .map(|t| t.subscriber_count() > 0)
+            .unwrap_or(false);
+
+        let tap_primary_snapshot = if has_tap {
+            self.primary_ring.peek_slice(self.frame_samples)
+        } else {
+            Vec::new()
+        };
+        let tap_standby_snapshot = if has_tap {
+            self.standby_ring.peek_slice(self.frame_samples)
+        } else {
+            Vec::new()
+        };
+
         let mut spliced_in_this_frame = false;
+        let mut backchannel_in_this_frame = false;
         let mut phase_offset_samples = 0usize;
+        let mut frame_provider = self.active_provider;
         let pcm_samples: Vec<i16>;
 
-        if self.pending_splice {
+        if self.pending_backchannel_to_tts_splice && self.primary_ring.len() >= self.frame_samples {
+            // Seamless 5ms Hann crossfade from active Backchannel into newly arrived Primary TTS
+            let fade_len = self.dsp.fade_samples();
+            let remainder_len = self.frame_samples.saturating_sub(fade_len);
+
+            let backchannel_tail = self.backchannel.take_tail_and_complete(fade_len);
+
+            let search_window = fade_len + self.sample_rate.samples_for_ms(2);
+            let primary_peek = self.primary_ring.peek_slice(search_window);
+            let optimal_lag = self
+                .dsp
+                .find_optimal_phase_offset(&backchannel_tail, &primary_peek);
+            phase_offset_samples = optimal_lag;
+
+            if optimal_lag > 0 {
+                self.primary_ring.discard_samples(optimal_lag);
+            }
+
+            let mut primary_window = self
+                .primary_ring
+                .pop_exact_or_pad(fade_len + remainder_len, &mut self.last_output_sample);
+
+            self.last_rms_gain = normalize_standby_rms_gain(&backchannel_tail, &mut primary_window);
+
+            let mut crossfaded = self
+                .dsp
+                .crossfade_5ms(&backchannel_tail, &primary_window[0..fade_len]);
+            crossfaded.extend_from_slice(&primary_window[fade_len..]);
+
+            if let Some(&last) = crossfaded.last() {
+                self.last_output_sample = last;
+            }
+
+            self.pending_backchannel_to_tts_splice = false;
+            spliced_in_this_frame = true;
+            backchannel_in_this_frame = true;
+            frame_provider = ProviderId::PrimaryCartesia;
+            self.primary_samples_egressed += self.frame_samples;
+            self.sync_watchdog_buffer_occupancy();
+
+            pcm_samples = crossfaded;
+        } else if self.backchannel.is_active() {
+            // Stream 10ms of prosodic backchannel while still waiting for LLM first TTS chunks
+            let out = self.backchannel.pull_samples(self.frame_samples);
+            if let Some(&last) = out.last() {
+                self.last_output_sample = last;
+            }
+            backchannel_in_this_frame = true;
+            frame_provider = ProviderId::SyntheticComfortNoise;
+            pcm_samples = out;
+        } else if self.pending_splice {
             // First check if prosodic word-boundary alignment is available
             let search_window = self.dsp.fade_samples() + self.sample_rate.samples_for_ms(2);
             let standby_peek = self.standby_ring.peek_slice(search_window);
@@ -402,15 +542,13 @@ impl StatefulSplicer {
                 self.settle_standby_playhead_debt();
             }
 
-            let fade_len = self.dsp.fade_samples(); // 5ms = 120 samples @ 24kHz
-            let remainder_len = self.frame_samples.saturating_sub(fade_len); // Remaining 5ms = 120 samples
+            let fade_len = self.dsp.fade_samples();
+            let remainder_len = self.frame_samples.saturating_sub(fade_len);
 
-            // Extract 5ms tail from primary holdback ring (or smoothly damped tail if TTFB stalled at 0 bytes)
             let primary_tail = self
                 .primary_ring
                 .pop_exact_or_pad(fade_len, &mut self.last_output_sample);
 
-            // Inspect standby ring to align phase before consuming
             let standby_peek_search = self
                 .standby_ring
                 .peek_slice(fade_len + self.sample_rate.samples_for_ms(2));
@@ -438,7 +576,6 @@ impl StatefulSplicer {
             standby_fade_head.copy_from_slice(&combined_standby[..fade_len]);
             standby_remainder.copy_from_slice(&combined_standby[fade_len..]);
 
-            // Synthesize 5ms raised-cosine crossfaded segment
             let mut crossfaded = self.dsp.crossfade_5ms(&primary_tail, &standby_fade_head);
             crossfaded.extend_from_slice(&standby_remainder);
 
@@ -447,6 +584,7 @@ impl StatefulSplicer {
             }
 
             self.active_provider = ProviderId::StandbyElevenLabs;
+            frame_provider = ProviderId::StandbyElevenLabs;
             self.pending_splice = false;
             spliced_in_this_frame = true;
             self.primary_ring.clear();
@@ -501,12 +639,34 @@ impl StatefulSplicer {
 
         self.telemetry.increment_egress_frames();
 
+        if let Some(ref tap) = self.inspector_tap {
+            if tap.subscriber_count() > 0 {
+                let standby_or_bc = if backchannel_in_this_frame {
+                    pcm_samples.clone()
+                } else {
+                    tap_standby_snapshot
+                };
+                tap.publish_packet(&InspectorTapPacket {
+                    spliced_in_this_frame,
+                    backchannel_active: backchannel_in_this_frame,
+                    primary_stalled: self.active_provider == ProviderId::StandbyElevenLabs,
+                    active_provider: frame_provider,
+                    rtp_sequence,
+                    sample_count: self.frame_samples as u16,
+                    pts_us,
+                    primary_pcm: tap_primary_snapshot,
+                    standby_pcm: standby_or_bc,
+                    egress_pcm: pcm_samples.clone(),
+                });
+            }
+        }
+
         Some(EgressAudioFrame {
             rtp_sequence,
             rtp_timestamp,
             pts_us,
             sample_rate: self.sample_rate,
-            active_provider: self.active_provider,
+            active_provider: frame_provider,
             spliced_in_this_frame,
             phase_offset_samples,
             pcm_samples,
@@ -514,8 +674,6 @@ impl StatefulSplicer {
         })
     }
 
-    /// Spawns the real-time 10ms asynchronous pacing engine that drains chunks, listens
-    /// for high-priority Watchdog failover signals, and emits contiguous WebRTC RTP frames.
     pub fn spawn_realtime_loop(
         mut self,
         mut chunk_rx: mpsc::Receiver<AudioChunk>,

@@ -159,6 +159,7 @@ pub struct TelemetryCollector {
     failover_predictive_jitter_total: AtomicU64,
     failover_socket_drop_total: AtomicU64,
     saved_calls_total: AtomicU64,
+    backchannel_injections_total: AtomicU64,
     egress_frames_total: AtomicU64,
     dropped_frames_total: AtomicU64,
     event_tx: broadcast::Sender<TelemetryEvent>,
@@ -187,6 +188,7 @@ impl TelemetryCollector {
             failover_predictive_jitter_total: AtomicU64::new(0),
             failover_socket_drop_total: AtomicU64::new(0),
             saved_calls_total: AtomicU64::new(0),
+            backchannel_injections_total: AtomicU64::new(0),
             egress_frames_total: AtomicU64::new(0),
             dropped_frames_total: AtomicU64::new(0),
             event_tx,
@@ -284,6 +286,17 @@ impl TelemetryCollector {
 
     pub fn saved_calls_count(&self) -> u64 {
         self.saved_calls_total.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn record_backchannel_injected(&self) {
+        self.backchannel_injections_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn backchannel_injections_count(&self) -> u64 {
+        self.backchannel_injections_total.load(Ordering::Relaxed)
     }
 
     pub fn dropped_frames_count(&self) -> u64 {
@@ -390,6 +403,17 @@ impl TelemetryCollector {
             out,
             "cadence_saved_calls_total {}",
             self.saved_calls_count()
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP cadence_backchannel_injections_total Total 450ms LLM stall backchannel fillers injected."
+        );
+        let _ = writeln!(out, "# TYPE cadence_backchannel_injections_total counter");
+        let _ = writeln!(
+            out,
+            "cadence_backchannel_injections_total {}",
+            self.backchannel_injections_count()
         );
 
         let _ = writeln!(

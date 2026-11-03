@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/verify_all.sh
-# Complete 6-Stage Production Verification Pipeline for Cadence.
+# Complete 7-Stage Production Verification Pipeline for Cadence.
 
 set -euo pipefail
 
@@ -21,23 +21,28 @@ if [[ "$(uname -s)" == "Darwin" ]] && [[ -d "/opt/homebrew/opt/opus/lib/pkgconfi
 fi
 
 echo "=================================================================="
-echo " [1/6] Running Pure-Rust & libopus FFI Hermetic Chaos Test Suites"
+echo " [1/7] Running Pure-Rust & libopus FFI Hermetic Chaos Test Suites"
 echo "=================================================================="
 cargo test --release -- --nocapture
 cargo test --release --features opus-encoding -- --nocapture
 
 echo "=================================================================="
-echo " [2/6] Running Phase 3 Scaling Subsystems Suite (Trunk/Engine/Drain)"
+echo " [2/7] Running Phase 3 Scaling Subsystems Suite (Trunk/Engine/Drain)"
 echo "=================================================================="
 cargo test --release --test scale_subsystems -- --nocapture
 
 echo "=================================================================="
-echo " [3/6] Running 10,000-Stream Concurrency & Hot-Splice Benchmark"
+echo " [3/7] Running Backchannel (450ms LLM Masking) & Binary WS Tap Suite"
+echo "=================================================================="
+cargo test --release --test backchannel_and_tap -- --nocapture
+
+echo "=================================================================="
+echo " [4/7] Running 10,000-Stream Concurrency & Hot-Splice Benchmark"
 echo "=================================================================="
 cargo bench --bench scale_10k
 
 echo "=================================================================="
-echo " [4/6] Booting Unified Cadence Edge Server (:8080) & Metrics (:9091)"
+echo " [5/7] Booting Unified Cadence Edge Server (:8080) & Metrics (:9091)"
 echo "=================================================================="
 cargo build --release --features opus-encoding
 ./target/release/cadence &
@@ -63,10 +68,12 @@ echo "Readiness (/readyz)  : $(curl -fsS "http://${CADENCE_INGRESS_ADDR}/readyz"
 echo "Weather (/v1/weather): $(curl -fsS "http://${CADENCE_INGRESS_ADDR}/v1/weather")"
 
 echo "=================================================================="
-echo " [5/6] Verifying Live Chaos Stall API & Acoustic Flight Recorder WAVs"
+echo " [6/7] Verifying Chaos Stall API, LLM Backchannel API & Flight WAVs"
 echo "=================================================================="
 CHAOS_JSON="$(curl -fsS -X POST "http://${CADENCE_INGRESS_ADDR}/v1/chaos/stall")"
-echo "Chaos API Response   : ${CHAOS_JSON}"
+LLM_STALL_JSON="$(curl -fsS -X POST "http://${CADENCE_INGRESS_ADDR}/v1/chaos/llm-stall")"
+echo "Chaos Socket Stall   : ${CHAOS_JSON}"
+echo "Chaos LLM Stall (BC) : ${LLM_STALL_JSON}"
 SPLICED_BYTES="$(curl -fsS "http://${CADENCE_INGRESS_ADDR}/v1/flight-recorder/spliced.wav" | wc -c | tr -d ' ')"
 NAIVE_BYTES="$(curl -fsS "http://${CADENCE_INGRESS_ADDR}/v1/flight-recorder/naive.wav" | wc -c | tr -d ' ')"
 echo "Flight Recorder WAVs : spliced.wav=${SPLICED_BYTES} bytes, naive.wav=${NAIVE_BYTES} bytes"
@@ -75,10 +82,10 @@ python3 -c "import websockets" 2>/dev/null || pip3 install --quiet websockets
 python3 scripts/smoke_live_providers.py
 
 echo "=================================================================="
-echo " [6/6] Verifying Prometheus Telemetry Exposition (:9091/metrics)"
+echo " [7/7] Verifying Prometheus Telemetry Exposition (:9091/metrics)"
 echo "=================================================================="
-curl -fsS "http://${CADENCE_METRICS_ADDR}/metrics" | grep -E "cadence_(failover|saved|splice|dropped|egress)"
+curl -fsS "http://${CADENCE_METRICS_ADDR}/metrics" | grep -E "cadence_(failover|saved|splice|dropped|egress|backchannel)"
 
 echo "=================================================================="
-echo " ALL 6 CADENCE PRODUCTION INFRASTRUCTURE STAGES PASSED"
+echo " ALL 7 CADENCE PRODUCTION INFRASTRUCTURE STAGES PASSED"
 echo "=================================================================="
