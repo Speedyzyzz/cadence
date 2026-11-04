@@ -32,6 +32,13 @@ pub trait TtsProviderEndpoint: Send + Sync + 'static {
     async fn send_warm_heartbeat(&self, timestamp_us: u64) -> Result<u64, CadenceError>;
     async fn send_zero_payload_handshake(&self, session_id: &str) -> Result<(), CadenceError>;
     async fn send_context_cancel(&self, context_id: &str) -> Result<(), CadenceError>;
+    async fn send_cancel_utterance(
+        &self,
+        _session_id: &str,
+        _utterance_id: u64,
+    ) -> Result<(), CadenceError> {
+        Ok(())
+    }
     async fn is_healthy(&self) -> bool;
     async fn shutdown(&self) -> Result<(), CadenceError>;
 }
@@ -385,6 +392,14 @@ impl TtsProviderEndpoint for WebSocketTtsEndpoint {
             .map_err(|e| CadenceError::ChannelClosed(e.to_string()))
     }
 
+    async fn send_cancel_utterance(
+        &self,
+        session_id: &str,
+        _utterance_id: u64,
+    ) -> Result<(), CadenceError> {
+        self.send_context_cancel(session_id).await
+    }
+
     async fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }
@@ -635,6 +650,36 @@ impl AudioStreamMultiplexer {
         }
         let _ = self.primary.shutdown().await;
         let _ = self.standby.shutdown().await;
+        Ok(())
+    }
+
+    /// Dispatches an immediate sub-5ms user barge-in cancellation across watchdog and upstream providers.
+    pub async fn cancel_utterance(
+        &self,
+        session_id: &str,
+        utterance_id: u64,
+    ) -> Result<(), CadenceError> {
+        let cancel_us = self.clock.now_us();
+        self.watchdog.on_barge_in_cancel(utterance_id, cancel_us);
+
+        // Disarm and clear in-flight requests
+        {
+            let mut guard = self.last_request.write().await;
+            *guard = None;
+        }
+
+        // Notify upstream providers to discard queued tokens
+        let _ = self
+            .primary
+            .send_cancel_utterance(session_id, utterance_id)
+            .await;
+        let _ = self
+            .standby
+            .send_cancel_utterance(session_id, utterance_id)
+            .await;
+        let _ = self.primary.send_context_cancel(session_id).await;
+        let _ = self.standby.send_context_cancel(session_id).await;
+
         Ok(())
     }
 }

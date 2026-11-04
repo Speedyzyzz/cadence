@@ -1,5 +1,7 @@
 /target
 tests/artifacts/*.wav
+tests/artifacts/*.csv
 *.swp
 *.swo
 .DS_Store
+.agents/

@@ -4,7 +4,7 @@
 //! percentiles (p50, p95, p99), rolling TTFB for canary shadowing decisions, and splice
 //! latency using wait-free 64-bucket microsecond histograms.
 
-use crate::protocol::{FailoverReason, MonotonicClock, ProviderId};
+use crate::protocol::{FailoverReason, MonotonicClock, ProviderId, TurnLifecycleSpan};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -31,12 +31,19 @@ impl Default for LockFreeHistogram {
 
 impl LockFreeHistogram {
     pub fn new() -> Self {
+        Self::with_step(500, 4_000)
+    }
+
+    /// Creates a 64-bucket lock-free histogram with custom microsecond step widths:
+    /// Buckets 0..32 use `fine_step_us`; buckets 32..64 use `coarse_step_us`.
+    pub fn with_step(fine_step_us: u64, coarse_step_us: u64) -> Self {
         let mut upper_bounds_us = [0u64; HISTOGRAM_BUCKETS];
+        let base_cutoff = 32 * fine_step_us;
         for (i, bound) in upper_bounds_us.iter_mut().enumerate() {
             if i < 32 {
-                *bound = ((i as u64) + 1) * 500;
+                *bound = ((i as u64) + 1) * fine_step_us;
             } else {
-                *bound = 16_000 + ((i as u64 - 31) * 4_000);
+                *bound = base_cutoff + ((i as u64 - 31) * coarse_step_us);
             }
         }
 
@@ -162,6 +169,15 @@ pub struct TelemetryCollector {
     backchannel_injections_total: AtomicU64,
     egress_frames_total: AtomicU64,
     dropped_frames_total: AtomicU64,
+    turn_vad_hist: LockFreeHistogram,
+    turn_llm_ttft_hist: LockFreeHistogram,
+    turn_vocoder_splice_hist: LockFreeHistogram,
+    turn_network_hist: LockFreeHistogram,
+    turn_worklet_hist: LockFreeHistogram,
+    turn_hardware_dac_hist: LockFreeHistogram,
+    turn_mouth_to_ear_hist: LockFreeHistogram,
+    barge_in_cancel_total: AtomicU64,
+    barge_in_latency_hist: LockFreeHistogram,
     event_tx: broadcast::Sender<TelemetryEvent>,
 }
 
@@ -191,6 +207,15 @@ impl TelemetryCollector {
             backchannel_injections_total: AtomicU64::new(0),
             egress_frames_total: AtomicU64::new(0),
             dropped_frames_total: AtomicU64::new(0),
+            turn_vad_hist: LockFreeHistogram::with_step(10_000, 20_000),
+            turn_llm_ttft_hist: LockFreeHistogram::with_step(10_000, 25_000),
+            turn_vocoder_splice_hist: LockFreeHistogram::with_step(5_000, 15_000),
+            turn_network_hist: LockFreeHistogram::with_step(2_000, 10_000),
+            turn_worklet_hist: LockFreeHistogram::with_step(250, 1_000),
+            turn_hardware_dac_hist: LockFreeHistogram::with_step(5_000, 15_000),
+            turn_mouth_to_ear_hist: LockFreeHistogram::with_step(25_000, 50_000),
+            barge_in_cancel_total: AtomicU64::new(0),
+            barge_in_latency_hist: LockFreeHistogram::with_step(100, 500),
             event_tx,
         }
     }
@@ -312,6 +337,50 @@ impl TelemetryCollector {
             self.jitter_hist.percentile_us(0.50),
             self.jitter_hist.percentile_us(0.95),
             self.jitter_hist.percentile_us(0.99),
+        )
+    }
+
+    /// Records a complete T0 -> T8 conversational turn span across all 7 stage histograms.
+    pub fn record_turn_lifecycle(&self, span: &TurnLifecycleSpan) {
+        self.turn_vad_hist.record(span.vad_endpointing_us());
+        self.turn_llm_ttft_hist.record(span.llm_ttft_us());
+        self.turn_vocoder_splice_hist
+            .record(span.vocoder_and_splice_us());
+        self.turn_network_hist.record(span.network_transit_us());
+        self.turn_worklet_hist.record(span.worklet_scheduling_us());
+        self.turn_hardware_dac_hist.record(span.hardware_dac_us());
+        self.turn_mouth_to_ear_hist
+            .record(span.total_mouth_to_ear_us());
+    }
+
+    pub fn mouth_to_ear_percentiles_us(&self) -> (u64, u64, u64) {
+        (
+            self.turn_mouth_to_ear_hist.percentile_us(0.50),
+            self.turn_mouth_to_ear_hist.percentile_us(0.95),
+            self.turn_mouth_to_ear_hist.percentile_us(0.99),
+        )
+    }
+
+    pub fn record_barge_in_completed(&self, utterance_id: u64, latency_us: u64) {
+        self.barge_in_cancel_total.fetch_add(1, Ordering::Relaxed);
+        self.barge_in_latency_hist.record(latency_us);
+
+        let _ = self.event_tx.send(TelemetryEvent {
+            timestamp_us: MonotonicClock::wall_clock_us(),
+            event_type: "barge_in_completed".to_string(),
+            details: format!("utterance_id={utterance_id},latency_us={latency_us}"),
+        });
+    }
+
+    pub fn barge_in_count(&self) -> u64 {
+        self.barge_in_cancel_total.load(Ordering::Relaxed)
+    }
+
+    pub fn barge_in_percentiles_us(&self) -> (u64, u64, u64) {
+        (
+            self.barge_in_latency_hist.percentile_us(0.50),
+            self.barge_in_latency_hist.percentile_us(0.95),
+            self.barge_in_latency_hist.percentile_us(0.99),
         )
     }
 
@@ -482,6 +551,60 @@ impl TelemetryCollector {
         let _ = writeln!(
             out,
             "cadence_splice_latency_microseconds{{quantile=\"0.99\"}} {s_p99}"
+        );
+
+        let (m2e_p50, m2e_p95, m2e_p99) = self.mouth_to_ear_percentiles_us();
+        let _ = writeln!(
+            out,
+            "# HELP cadence_mouth_to_ear_microseconds True T0->T8 glass-to-glass latency in microseconds."
+        );
+        let _ = writeln!(out, "# TYPE cadence_mouth_to_ear_microseconds summary");
+        let _ = writeln!(
+            out,
+            "cadence_mouth_to_ear_microseconds{{quantile=\"0.5\"}} {m2e_p50}"
+        );
+        let _ = writeln!(
+            out,
+            "cadence_mouth_to_ear_microseconds{{quantile=\"0.95\"}} {m2e_p95}"
+        );
+        let _ = writeln!(
+            out,
+            "cadence_mouth_to_ear_microseconds{{quantile=\"0.99\"}} {m2e_p99}"
+        );
+        let _ = writeln!(
+            out,
+            "cadence_mouth_to_ear_microseconds_count {}",
+            self.turn_mouth_to_ear_hist.count()
+        );
+
+        let (b_p50, b_p95, b_p99) = self.barge_in_percentiles_us();
+        let _ = writeln!(
+            out,
+            "# HELP cadence_barge_in_cancellations_total Total number of user barge-in interruptions handled."
+        );
+        let _ = writeln!(out, "# TYPE cadence_barge_in_cancellations_total counter");
+        let _ = writeln!(
+            out,
+            "cadence_barge_in_cancellations_total {}",
+            self.barge_in_count()
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP cadence_barge_in_latency_microseconds Time from CancelUtterance receipt to 5ms Hann fade-to-silence emission."
+        );
+        let _ = writeln!(out, "# TYPE cadence_barge_in_latency_microseconds summary");
+        let _ = writeln!(
+            out,
+            "cadence_barge_in_latency_microseconds{{quantile=\"0.5\"}} {b_p50}"
+        );
+        let _ = writeln!(
+            out,
+            "cadence_barge_in_latency_microseconds{{quantile=\"0.95\"}} {b_p95}"
+        );
+        let _ = writeln!(
+            out,
+            "cadence_barge_in_latency_microseconds{{quantile=\"0.99\"}} {b_p99}"
         );
 
         out

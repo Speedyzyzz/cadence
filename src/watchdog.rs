@@ -144,6 +144,25 @@ impl LatencyWatchdog {
         self.in_active_utterance.store(true, Ordering::Release);
     }
 
+    /// Atomically disarms all TTFB and inter-chunk timers on user barge-in
+    /// and broadcasts `FailoverSignal::CancelUtterance`.
+    pub fn on_barge_in_cancel(&self, utterance_id: u64, cancel_us: u64) -> FailoverSignal {
+        self.active_utterance_id.store(0, Ordering::Release);
+        self.utterance_dispatch_us.store(0, Ordering::Release);
+        self.awaiting_first_byte.store(false, Ordering::Release);
+        self.in_active_utterance.store(false, Ordering::Release);
+        self.last_primary_chunk_us.store(0, Ordering::Release);
+        self.state
+            .store(WatchdogState::PrimaryActive as u8, Ordering::Release);
+
+        let signal = FailoverSignal::CancelUtterance {
+            utterance_id,
+            cancel_us,
+        };
+        let _ = self.failover_tx.send(signal);
+        signal
+    }
+
     /// Observes an incoming audio chunk, updating TTFB metrics and RFC 3550 EWMA jitter.
     pub fn observe_chunk(&self, chunk: &AudioChunk) {
         let active_utt = self.active_utterance_id.load(Ordering::Acquire);

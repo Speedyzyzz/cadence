@@ -32,17 +32,23 @@ echo "=================================================================="
 cargo test --release --test scale_subsystems -- --nocapture
 
 echo "=================================================================="
-echo " [3/7] Running Backchannel (450ms LLM Masking) & Binary WS Tap Suite"
+echo " [3/8] Running Backchannel (450ms LLM Masking) & Binary WS Tap Suite"
 echo "=================================================================="
 cargo test --release --test backchannel_and_tap -- --nocapture
 
 echo "=================================================================="
-echo " [4/7] Running 10,000-Stream Concurrency & Hot-Splice Benchmark"
+echo " [4/8] Running Sub-5ms Barge-In Interruption & Watermark Fencing Suite"
 echo "=================================================================="
+cargo test --release --test barge_in_cancel -- --nocapture
+
+echo "=================================================================="
+echo " [5/8] Running 500-Turn Glass-to-Glass (T0->T8) & 10k Scale Benchmarks"
+echo "=================================================================="
+cargo bench --bench pareto_tradeoffs
 cargo bench --bench scale_10k
 
 echo "=================================================================="
-echo " [5/7] Booting Unified Cadence Edge Server (:8080) & Metrics (:9091)"
+echo " [6/8] Booting Unified Cadence Edge Server (:8080) & Metrics (:9091)"
 echo "=================================================================="
 cargo build --release --features opus-encoding
 ./target/release/cadence &
@@ -68,7 +74,7 @@ echo "Readiness (/readyz)  : $(curl -fsS "http://${CADENCE_INGRESS_ADDR}/readyz"
 echo "Weather (/v1/weather): $(curl -fsS "http://${CADENCE_INGRESS_ADDR}/v1/weather")"
 
 echo "=================================================================="
-echo " [6/7] Verifying Chaos Stall API, LLM Backchannel API & Flight WAVs"
+echo " [7/8] Verifying Chaos Stall API, LLM Backchannel API & Flight WAVs"
 echo "=================================================================="
 CHAOS_JSON="$(curl -fsS -X POST "http://${CADENCE_INGRESS_ADDR}/v1/chaos/stall")"
 LLM_STALL_JSON="$(curl -fsS -X POST "http://${CADENCE_INGRESS_ADDR}/v1/chaos/llm-stall")"
@@ -82,10 +88,10 @@ python3 -c "import websockets" 2>/dev/null || pip3 install --quiet websockets
 python3 scripts/smoke_live_providers.py
 
 echo "=================================================================="
-echo " [7/7] Verifying Prometheus Telemetry Exposition (:9091/metrics)"
+echo " [8/8] Verifying Prometheus Telemetry Exposition (:9091/metrics)"
 echo "=================================================================="
-curl -fsS "http://${CADENCE_METRICS_ADDR}/metrics" | grep -E "cadence_(failover|saved|splice|dropped|egress|backchannel)"
+curl -fsS "http://${CADENCE_METRICS_ADDR}/metrics" | grep -E "cadence_(failover|saved|splice|dropped|egress|backchannel|mouth_to_ear|barge_in)"
 
 echo "=================================================================="
-echo " ALL 7 CADENCE PRODUCTION INFRASTRUCTURE STAGES PASSED"
+echo " ALL 8 CADENCE PRODUCTION INFRASTRUCTURE STAGES PASSED"
 echo "=================================================================="

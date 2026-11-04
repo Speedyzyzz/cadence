@@ -205,6 +205,26 @@ impl CrossfadeDspEngine {
 
         out
     }
+
+    /// Smoothly attenuates active audio to digital silence over a 5ms raised-cosine window,
+    /// padding any remaining frame duration (e.g., up to 10ms total) with exact 0i16 digital silence.
+    pub fn fade_to_silence_5ms(&self, active_tail: &[i16], total_frame_samples: usize) -> Vec<i16> {
+        let fade_len = self
+            .fade_samples
+            .min(active_tail.len())
+            .min(total_frame_samples);
+        let mut out = Vec::with_capacity(total_frame_samples);
+
+        for i in 0..fade_len {
+            let sample = active_tail[i] as f64;
+            let blended = (self.weights_out[i] * sample).round();
+            let clamped = blended.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            out.push(clamped);
+        }
+
+        out.resize(total_frame_samples, 0i16);
+        out
+    }
 }
 
 /// Module B: Stateful Splicer & 40ms Jitter Buffer with Backchannel & Binary WS Tap.
@@ -233,6 +253,8 @@ pub struct StatefulSplicer {
     telemetry: Arc<TelemetryCollector>,
     backchannel: BackchannelController,
     inspector_tap: Option<Arc<InspectorTapHub>>,
+    pending_barge_in: Option<(u64, u64)>,
+    cancelled_utterance_watermark: Option<u64>,
 }
 
 impl StatefulSplicer {
@@ -273,6 +295,8 @@ impl StatefulSplicer {
             telemetry,
             backchannel: BackchannelController::new(sample_rate),
             inspector_tap: None,
+            pending_barge_in: None,
+            cancelled_utterance_watermark: None,
         }
     }
 
@@ -351,6 +375,13 @@ impl StatefulSplicer {
     /// If the backchannel filler is currently playing, arms a 5ms Hann crossfade from the
     /// backchannel tail into the newly arrived live TTS stream.
     pub fn ingest_chunk(&mut self, chunk: AudioChunk) {
+        if self
+            .cancelled_utterance_watermark
+            .map_or(false, |w| chunk.utterance_id <= w)
+        {
+            return;
+        }
+
         let chunk_samples_len = chunk.samples.len();
 
         match chunk.provider {
@@ -428,12 +459,123 @@ impl StatefulSplicer {
                     info!(utterance_id, trigger_us, "Restored primary provider stream");
                 }
             }
+            FailoverSignal::CancelUtterance {
+                utterance_id,
+                cancel_us,
+            } => {
+                self.pending_barge_in = Some((utterance_id, cancel_us));
+                self.cancelled_utterance_watermark = Some(
+                    self.cancelled_utterance_watermark
+                        .map_or(utterance_id, |w| w.max(utterance_id)),
+                );
+                self.backchannel.cancel();
+                self.pending_splice = false;
+                self.pending_backchannel_to_tts_splice = false;
+                self.primed = true;
+                info!(
+                    utterance_id,
+                    cancel_us, "Splicer primed for sub-5ms barge-in fade-to-silence"
+                );
+            }
+        }
+    }
+
+    /// Immediately synthesizes the 5ms Hann fade-to-silence frame upon user barge-in,
+    /// clearing remaining ring buffers and recording barge-in latency in telemetry.
+    pub fn execute_barge_in_fade_frame(
+        &mut self,
+        utterance_id: u64,
+        cancel_us: u64,
+    ) -> EgressAudioFrame {
+        let active_tail = match self.active_provider {
+            ProviderId::PrimaryCartesia => {
+                if !self.primary_ring.is_empty() {
+                    self.primary_ring.peek_slice(self.dsp.fade_samples())
+                } else if !self.standby_ring.is_empty() {
+                    self.standby_ring.peek_slice(self.dsp.fade_samples())
+                } else {
+                    Vec::new()
+                }
+            }
+            ProviderId::StandbyElevenLabs | ProviderId::SyntheticComfortNoise => {
+                if !self.standby_ring.is_empty() {
+                    self.standby_ring.peek_slice(self.dsp.fade_samples())
+                } else if !self.primary_ring.is_empty() {
+                    self.primary_ring.peek_slice(self.dsp.fade_samples())
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+
+        let pcm_samples = self
+            .dsp
+            .fade_to_silence_5ms(&active_tail, self.frame_samples);
+
+        // Clear both rings to discard cancelled utterance samples
+        self.primary_ring.clear();
+        self.standby_ring.clear();
+        self.primary_alignment.reset();
+        self.standby_alignment.reset();
+        self.standby_playhead_debt = 0;
+        self.primary_samples_egressed = 0;
+        self.last_output_sample = 0;
+        self.pending_barge_in = None;
+        self.primed = false;
+        self.sync_watchdog_buffer_occupancy();
+
+        let pts_us = self.next_pts_us;
+        self.next_pts_us += (self.frame_duration_ms as u64) * 1_000;
+
+        let (rtp_sequence, rtp_timestamp, rtp_packet) =
+            self.packetizer
+                .packetize(&pcm_samples, self.sample_rate, true);
+
+        self.telemetry.increment_egress_frames();
+
+        let now_us = self.clock.now_us();
+        let barge_in_latency_us = now_us.saturating_sub(cancel_us);
+        self.telemetry
+            .record_barge_in_completed(utterance_id, barge_in_latency_us);
+
+        if let Some(ref tap) = self.inspector_tap {
+            if tap.subscriber_count() > 0 {
+                tap.publish_packet(&InspectorTapPacket {
+                    spliced_in_this_frame: true,
+                    backchannel_active: false,
+                    primary_stalled: false,
+                    active_provider: self.active_provider,
+                    rtp_sequence,
+                    sample_count: self.frame_samples as u16,
+                    pts_us,
+                    primary_pcm: pcm_samples.clone(),
+                    standby_pcm: vec![0i16; self.frame_samples],
+                    egress_pcm: pcm_samples.clone(),
+                });
+            }
+        }
+
+        EgressAudioFrame {
+            rtp_sequence,
+            rtp_timestamp,
+            pts_us,
+            sample_rate: self.sample_rate,
+            active_provider: self.active_provider,
+            spliced_in_this_frame: true,
+            barge_in_faded: true,
+            phase_offset_samples: 0,
+            pcm_samples,
+            rtp_packet,
         }
     }
 
     /// Produces a single 10ms egress frame, executing backchannel emission, backchannel->TTS
     /// 5ms Hann crossfading, or Primary->Standby 5ms Hann crossfading as needed.
     pub fn pull_10ms_egress_frame(&mut self, trigger_us: Option<u64>) -> Option<EgressAudioFrame> {
+        if let Some((utt_id, cancel_us)) = self.pending_barge_in.take() {
+            return Some(self.execute_barge_in_fade_frame(utt_id, cancel_us));
+        }
+
         let now_us = self.clock.now_us();
         self.evaluate_backchannel_at(now_us);
 
@@ -668,6 +810,7 @@ impl StatefulSplicer {
             sample_rate: self.sample_rate,
             active_provider: frame_provider,
             spliced_in_this_frame,
+            barge_in_faded: false,
             phase_offset_samples,
             pcm_samples,
             rtp_packet,
@@ -693,10 +836,21 @@ impl StatefulSplicer {
                     biased;
 
                     Ok(signal) = failover_rx.recv() => {
-                        if let FailoverSignal::SwitchToStandby { trigger_us, .. } = signal {
-                            last_trigger_us = Some(trigger_us);
+                        match signal {
+                            FailoverSignal::CancelUtterance { utterance_id, cancel_us } => {
+                                let fade_frame = self.execute_barge_in_fade_frame(utterance_id, cancel_us);
+                                if egress_tx.send(fade_frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                            FailoverSignal::SwitchToStandby { trigger_us, .. } => {
+                                last_trigger_us = Some(trigger_us);
+                                self.handle_failover_signal(signal);
+                            }
+                            FailoverSignal::RestorePrimary { .. } => {
+                                self.handle_failover_signal(signal);
+                            }
                         }
-                        self.handle_failover_signal(signal);
                     }
 
                     Some(chunk) = chunk_rx.recv() => {

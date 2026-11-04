@@ -7,8 +7,8 @@ use crate::engine::ShardedTickEngine;
 use crate::flight_recorder::AcousticFlightRecorder;
 use crate::inspector_tap::InspectorTapHub;
 use crate::protocol::{
-    AudioChunk, FailoverReason, FailoverSignal, MonotonicClock, ProviderId, SampleRate,
-    SynthesisRequest,
+    AudioChunk, BargeInAckEvent, ClientControlMessage, FailoverReason, FailoverSignal,
+    MonotonicClock, ProviderId, SampleRate, SynthesisRequest,
 };
 use crate::splicer::StatefulSplicer;
 use crate::telemetry::TelemetryCollector;
@@ -494,7 +494,7 @@ async fn handle_websocket_tts_session(
         }
     }
 
-    let (_watchdog, chunk_tx, mut egress_rx) = state
+    let (watchdog, chunk_tx, mut egress_rx) = state
         .engine
         .create_session(
             numeric_id,
@@ -514,15 +514,45 @@ async fn handle_websocket_tts_session(
                 match msg_res {
                     Ok(Message::Text(txt)) => {
                         let _utt_guard = state.drain.track_inflight_utterance();
-                        let req: SynthesisRequest = serde_json::from_str(&txt).unwrap_or(SynthesisRequest {
-                            session_id: session_id_hdr.clone(),
-                            utterance_id: 1,
-                            text_segment: txt.to_string(),
-                            voice_id_primary: "cartesia-sonic".to_string(),
-                            voice_id_standby: "elevenlabs-flash".to_string(),
-                            dispatch_us: state.clock.now_us(),
-                            flush: true,
-                        });
+                        if let Ok(ClientControlMessage::CancelUtterance { session_id, utterance_id, client_timestamp_us }) = serde_json::from_str::<ClientControlMessage>(&txt) {
+                            let t_cancel_start_us = if client_timestamp_us > 0 { client_timestamp_us } else { state.clock.now_us() };
+                            watchdog.on_barge_in_cancel(utterance_id, t_cancel_start_us);
+
+                            if let Ok(Some(egress)) = tokio::time::timeout(
+                                std::time::Duration::from_millis(15),
+                                egress_rx.recv(),
+                            ).await {
+                                let mut raw_bytes = Vec::with_capacity(egress.pcm_samples.len() * 2);
+                                for &s in &egress.pcm_samples {
+                                    raw_bytes.extend_from_slice(&s.to_le_bytes());
+                                }
+                                let _ = ws_write.send(Message::Binary(raw_bytes.into())).await;
+                            }
+
+                            let ack = BargeInAckEvent {
+                                event: "barge_in_acknowledged",
+                                session_id: if session_id.is_empty() { session_id_hdr.clone() } else { session_id },
+                                utterance_id,
+                                barge_in_latency_us: state.clock.now_us().saturating_sub(t_cancel_start_us),
+                            };
+                            let ack_txt = serde_json::to_string(&ack).unwrap_or_default();
+                            let _ = ws_write.send(Message::Text(ack_txt.into())).await;
+                            continue;
+                        }
+
+                        let req: SynthesisRequest = if let Ok(ClientControlMessage::Synthesize(s_req)) = serde_json::from_str::<ClientControlMessage>(&txt) {
+                            s_req
+                        } else {
+                            serde_json::from_str(&txt).unwrap_or(SynthesisRequest {
+                                session_id: session_id_hdr.clone(),
+                                utterance_id: 1,
+                                text_segment: txt.to_string(),
+                                voice_id_primary: "cartesia-sonic".to_string(),
+                                voice_id_standby: "elevenlabs-flash".to_string(),
+                                dispatch_us: state.clock.now_us(),
+                                flush: true,
+                            })
+                        };
 
                         if let Ok(mut guard) = state.sessions.write() {
                             if let Some(info) = guard.get_mut(&session_id_hdr) {
